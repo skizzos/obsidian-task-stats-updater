@@ -1,0 +1,10 @@
+{
+  "id": "task-stats-updater",
+  "name": "Task Stats Updater",
+  "version": "1.0.0",
+  "minAppVersion": "1.0.0",
+  "description": "Conta i task nel file corrente e aggiorna il frontmatter con statistiche e stato.",
+  "author": "Mark Fri",
+  "authorUrl": "",
+  "isDesktopOnly": false
+}

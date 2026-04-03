@@ -1,9 +1,166 @@
-const { Plugin, Notice } = require("obsidian");
+const { Plugin, Notice, PluginSettingTab, Setting } = require("obsidian");
 
+// ──────────────────────────────────────────────
+//  Default settings
+// ──────────────────────────────────────────────
+const DEFAULT_SETTINGS = {
+  excludedFolders: [],  // array of { pattern: string, isRegex: boolean }
+  excludedFiles:   [],  // array of { pattern: string, isRegex: boolean }
+};
+
+// ──────────────────────────────────────────────
+//  Helpers
+// ──────────────────────────────────────────────
+
+/** Render a section (folders OR files) inside the settings tab */
+function renderSection(containerEl, plugin, key, {
+  heading,
+  emptyText,
+  addLabel,
+  addDesc,
+  addPlaceholder,
+  badgeExact,
+  matchLabel,
+}) {
+  containerEl.createEl("h3", { text: heading });
+
+  // ── Existing rules list ───────────────────
+  const listEl = containerEl.createDiv(`task-stats-rules task-stats-rules-${key}`);
+
+  const renderList = () => {
+    listEl.empty();
+    const rules = plugin.settings[key];
+
+    if (rules.length === 0) {
+      listEl.createEl("p", { text: emptyText, cls: "setting-item-description" });
+      return;
+    }
+
+    rules.forEach((rule, idx) => {
+      new Setting(listEl)
+        .setName(rule.pattern)
+        .setDesc(rule.isRegex ? "🔤 Espressione regolare" : `${badgeExact} ${matchLabel}`)
+        .addButton((btn) =>
+          btn.setIcon("trash")
+            .setTooltip("Rimuovi")
+            .onClick(async () => {
+              plugin.settings[key].splice(idx, 1);
+              await plugin.saveSettings();
+              renderList();
+            })
+        );
+    });
+  };
+
+  renderList();
+
+  // ── Add new rule ──────────────────────────
+  let newPattern = "";
+  let newIsRegex = false;
+  let inputEl    = null;
+  let toggleRef  = null;
+
+  new Setting(containerEl)
+    .setName(addLabel)
+    .setDesc(addDesc)
+    .addText((text) => {
+      text.setPlaceholder(addPlaceholder)
+        .onChange((v) => { newPattern = v.trim(); });
+      inputEl = text.inputEl;
+    })
+    .addToggle((toggle) => {
+      toggle
+        .setTooltip("Attiva per trattare il valore come RegExp")
+        .setValue(false)
+        .onChange((v) => { newIsRegex = v; });
+      toggleRef = toggle;
+    })
+    .addButton((btn) => {
+      btn.setButtonText("Aggiungi")
+        .setCta()
+        .onClick(async () => {
+          if (!newPattern) {
+            new Notice("⚠️ Inserisci un valore.");
+            return;
+          }
+          if (newIsRegex) {
+            try { new RegExp(newPattern); }
+            catch (e) {
+              new Notice("⚠️ RegExp non valida: " + e.message);
+              return;
+            }
+          }
+
+          plugin.settings[key].push({ pattern: newPattern, isRegex: newIsRegex });
+          await plugin.saveSettings();
+
+          // reset
+          newPattern = "";
+          newIsRegex = false;
+          if (inputEl)   inputEl.value = "";
+          if (toggleRef) toggleRef.setValue(false);
+
+          renderList();
+        });
+    });
+}
+
+// ──────────────────────────────────────────────
+//  Settings Tab
+// ──────────────────────────────────────────────
+class TaskStatsSettingTab extends PluginSettingTab {
+  constructor(app, plugin) {
+    super(app, plugin);
+    this.plugin = plugin;
+  }
+
+  display() {
+    const { containerEl } = this;
+    containerEl.empty();
+
+    containerEl.createEl("h2", { text: "Task Stats Updater – Impostazioni" });
+
+    containerEl.createEl("p", {
+      text: "Configura cartelle e file da escludere dall'aggiornamento delle statistiche. Puoi usare percorsi/nomi esatti oppure espressioni regolari.",
+      cls: "setting-item-description",
+    });
+
+    // ── Excluded FOLDERS ──────────────────────
+    renderSection(containerEl, this.plugin, "excludedFolders", {
+      heading:        "📁 Cartelle escluse",
+      emptyText:      "Nessuna cartella esclusa.",
+      addLabel:       "Percorso cartella / RegExp",
+      addDesc:        "Prefisso cartella (es. \"Archivio\") oppure RegExp sul percorso completo (es. \"^Privato/.*\").",
+      addPlaceholder: "es. Archivio  o  ^Privato/.*",
+      badgeExact:     "📁",
+      matchLabel:     "Prefisso cartella",
+    });
+
+    containerEl.createEl("hr");
+
+    // ── Excluded FILES ────────────────────────
+    renderSection(containerEl, this.plugin, "excludedFiles", {
+      heading:        "📄 File esclusi",
+      emptyText:      "Nessun file escluso.",
+      addLabel:       "Nome file / RegExp",
+      addDesc:        "Nome esatto con estensione (es. \"Indice.md\") oppure RegExp sul percorso completo (es. \".*template.*\\.md$\").",
+      addPlaceholder: "es. Indice.md  o  .*template.*\\.md$",
+      badgeExact:     "📄",
+      matchLabel:     "Nome file esatto",
+    });
+  }
+}
+
+// ──────────────────────────────────────────────
+//  Plugin
+// ──────────────────────────────────────────────
 module.exports = class TaskStatsUpdater extends Plugin {
 
   async onload() {
     console.log("Task Stats Updater: caricato");
+
+    await this.loadSettings();
+    this.addSettingTab(new TaskStatsSettingTab(this.app, this));
 
     this.addCommand({
       id: "update-task-stats",
@@ -33,6 +190,56 @@ module.exports = class TaskStatsUpdater extends Plugin {
     console.log("Task Stats Updater: scaricato");
   }
 
+  // ── Settings persistence ───────────────────
+  async loadSettings() {
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    // Ensure both arrays exist even on old saved data (migration safety)
+    this.settings.excludedFolders ??= [];
+    this.settings.excludedFiles   ??= [];
+  }
+
+  async saveSettings() {
+    await this.saveData(this.settings);
+  }
+
+  // ── Exclusion checks ───────────────────────
+
+  isFolderExcluded(filePath) {
+    const normalised = filePath.replace(/\\/g, "/");
+    for (const rule of this.settings.excludedFolders) {
+      if (rule.isRegex) {
+        try { if (new RegExp(rule.pattern).test(normalised)) return true; }
+        catch (_) { /* skip invalid */ }
+      } else {
+        const prefix = rule.pattern.replace(/\\/g, "/").replace(/\/$/, "") + "/";
+        if (normalised.toLowerCase().startsWith(prefix.toLowerCase())) return true;
+      }
+    }
+    return false;
+  }
+
+  isFileExcluded(filePath) {
+    const normalised = filePath.replace(/\\/g, "/");
+    const fileName   = normalised.split("/").pop(); // bare filename
+
+    for (const rule of this.settings.excludedFiles) {
+      if (rule.isRegex) {
+        // RegExp tested against the full vault-relative path
+        try { if (new RegExp(rule.pattern).test(normalised)) return true; }
+        catch (_) { /* skip invalid */ }
+      } else {
+        // Exact match on the filename only (case-insensitive)
+        if (fileName.toLowerCase() === rule.pattern.toLowerCase()) return true;
+      }
+    }
+    return false;
+  }
+
+  isExcluded(filePath) {
+    return this.isFolderExcluded(filePath) || this.isFileExcluded(filePath);
+  }
+
+  // ── Core logic ─────────────────────────────
   async updateActiveFile() {
     const file = this.app.workspace.getActiveFile();
     if (!file) {
@@ -43,6 +250,11 @@ module.exports = class TaskStatsUpdater extends Plugin {
   }
 
   async updateStats(file) {
+    if (this.isExcluded(file.path)) {
+      console.log(`Task Stats Updater: file escluso → ${file.path}`);
+      return;
+    }
+
     const content = await this.app.vault.read(file);
     const lines   = content.split("\n");
 
